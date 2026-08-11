@@ -12,8 +12,12 @@ CHECK_INTERVAL = 5
 
 muramatsu_stop_event = threading.Event()
 
-# 通知済みテキスト
+# 通知済みイベントID
 sent_texts = set()
+
+# 保留中の打席結果イベント
+pending_result_events = []
+pending_result_ids = set()
 
 # 打席開始時の状況（例：無死一塁）
 last_atbat_info = None
@@ -41,15 +45,20 @@ RESULT_KEYWORDS = (
 def monitor_muramatsu_loop(game_id):
 
     global sent_texts
+    global pending_result_events
+    global pending_result_ids
     global last_atbat_info
 
     print("村松監視開始")
+
+    pending_result_events.clear()
+    pending_result_ids.clear()
 
     # 起動前のイベントは通知しない
     events = get_new_events(game_id, None)
 
     for event in events:
-        sent_texts.add(event["text"])
+        sent_texts.add(event["id"])
 
     print(f"{len(sent_texts)}件の過去イベントをスキップしました")
 
@@ -57,22 +66,43 @@ def monitor_muramatsu_loop(game_id):
 
         try:
 
+            # 前回保留した結果イベントを先に通知する
+            if pending_result_events:
+
+                for pending in pending_result_events:
+
+                    event = pending["event"]
+
+                    if event["id"] in sent_texts:
+                        continue
+
+                    send_muramatsu_result_notification(
+                        event,
+                        pending["atbat_info"]
+                    )
+
+                    sent_texts.add(event["id"])
+
+                pending_result_events.clear()
+                pending_result_ids.clear()
+
             events = get_new_events(game_id, None)
+
+            start_event_seen = False
 
             for event in events:
 
-                text = event["text"]
-
-                # 同じ本文は通知しない
-                if text in sent_texts:
+                if (
+                    event["id"] in sent_texts
+                    or event["id"] in pending_result_ids
+                ):
                     continue
 
-                sent_texts.add(text)
+                text = event["text"]
 
                 # 打席開始
                 if text.startswith("＜"):
 
-                    # 「＜2番：村松＞無死一塁」→「無死一塁」
                     if "＞" in text:
                         last_atbat_info = text.split("＞", 1)[1].strip()
                     else:
@@ -80,13 +110,33 @@ def monitor_muramatsu_loop(game_id):
 
                     send_muramatsu_atbat_notification(event)
 
-                # 打席結果
-                elif any(keyword in text for keyword in RESULT_KEYWORDS):
+                    sent_texts.add(event["id"])
 
-                    send_muramatsu_result_notification(
-                        event,
-                        last_atbat_info
-                    )
+                    start_event_seen = True
+
+                # 打席結果
+                elif any(
+                    keyword in text
+                    for keyword in RESULT_KEYWORDS
+                ):
+
+                    if start_event_seen:
+
+                        pending_result_events.append({
+                            "event": event,
+                            "atbat_info": last_atbat_info,
+                        })
+
+                        pending_result_ids.add(event["id"])
+
+                    else:
+
+                        send_muramatsu_result_notification(
+                            event,
+                            last_atbat_info
+                        )
+
+                        sent_texts.add(event["id"])
 
         except Exception as e:
 
